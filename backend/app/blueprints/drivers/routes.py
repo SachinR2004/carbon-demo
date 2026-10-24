@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
-from app.models import User, Driver, UserRole, ApprovalStatus, AuditLog, Notification
+from app.models import User, Driver, UserRole, ApprovalStatus, AuditLog, Notification, Trip
 from app.utils.rbac import role_required
 from datetime import datetime, timezone
 
@@ -18,6 +18,49 @@ def _notify(user_id, notif_type, message):
     db.session.add(n)
 
 
+def _is_driver_or_admin(user):
+    if not user:
+        return False
+    role_val = user.role.value if hasattr(user.role, 'value') else str(user.role)
+    return role_val.lower() in ['driver', 'admin']
+
+
+# ── Driver Stats ─────────────────────────────────────────────────────────────
+
+@drivers_bp.route('/stats', methods=['GET'])
+@jwt_required()
+def get_driver_stats():
+    """Real totals from this driver's completed trips (no placeholder numbers)."""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not _is_driver_or_admin(user):
+        return jsonify({"error": "forbidden", "message": "Driver access only"}), 403
+
+    driver = Driver.query.filter_by(user_id=user_id).first()
+    empty = {"completed_runs": 0, "distance_km": 0.0, "co2_kg": 0.0, "fuel_used": 0.0, "avg_eco_score": None}
+    if not driver:
+        return jsonify(empty), 200
+
+    from app.models import TripStatus, Route
+    from sqlalchemy import func
+    row = (db.session.query(
+                func.count(Trip.id),
+                func.coalesce(func.sum(Trip.actual_co2_kg), 0.0),
+                func.coalesce(func.sum(Trip.actual_fuel_l), 0.0))
+           .filter(Trip.driver_id == driver.id, Trip.status == TripStatus.completed).one())
+    dist, eco = (db.session.query(func.coalesce(func.sum(Route.distance_km), 0.0), func.avg(Route.eco_score))
+                 .join(Trip, Trip.id == Route.trip_id)
+                 .filter(Trip.driver_id == driver.id, Trip.status == TripStatus.completed).one())
+    return jsonify({
+        "completed_runs": int(row[0]),
+        "co2_kg": round(float(row[1]), 2),
+        "fuel_used": round(float(row[2]), 2),
+        "distance_km": round(float(dist), 1),
+        "avg_eco_score": round(float(eco), 1) if eco is not None else None,
+    }), 200
+
+
 # ── Driver self-service ──────────────────────────────────────────────────────
 
 @drivers_bp.route('/me', methods=['GET'])
@@ -25,7 +68,8 @@ def _notify(user_id, notif_type, message):
 def get_my_profile():
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    if not user or user.role != UserRole.driver:
+    
+    if not _is_driver_or_admin(user):
         return jsonify({"error": "forbidden", "message": "Driver access only"}), 403
 
     driver = Driver.query.filter_by(user_id=user_id).first()
@@ -66,7 +110,8 @@ def get_my_profile():
 def update_my_profile():
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
-    if not user or user.role != UserRole.driver:
+    
+    if not _is_driver_or_admin(user):
         return jsonify({"error": "forbidden", "message": "Driver access only"}), 403
 
     driver = Driver.query.filter_by(user_id=user_id).first()

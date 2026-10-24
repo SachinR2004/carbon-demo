@@ -1,234 +1,232 @@
+from datetime import datetime, timedelta, timezone
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app import db, limiter
-from app.models import Trip, TripStatus, Route as RouteModel, Driver, Vehicle, UserRole
-from app.services.google_maps_service import get_candidate_routes
-from app.services.weather_service import get_current_weather
-from app.ml.predict import predict_trip_metrics
+
+from app import db
+from app.models import Trip, Driver, Vehicle, TripStatus, Route, User
 
 trips_bp = Blueprint('trips', __name__)
 
-@trips_bp.route('', methods=['POST'])
+IST = timedelta(hours=5, minutes=30)
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _current_user():
+    return User.query.get(get_jwt_identity())
+
+
+def _is_admin(user):
+    return bool(user) and getattr(user.role, 'value', str(user.role)) == 'admin'
+
+
+def _driver_for(user):
+    return Driver.query.filter_by(user_id=user.id).first() if user else None
+
+
+def _vehicle_for(driver, requested_id=None):
+    """Vehicle used for a trip. trips.vehicle_id is NOT NULL, so we always need one."""
+    if requested_id:
+        v = Vehicle.query.get(requested_id)
+        if v:
+            return v
+    v = Vehicle.query.filter_by(assigned_driver_id=driver.id).first()
+    # demo fallback: no assigned vehicle -> first vehicle on file
+    return v or Vehicle.query.order_by(Vehicle.id).first()
+
+
+def _num(value, default=0.0, lo=0.0, hi=1_000_000.0):
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(n, lo), hi) if n == n else default  # n == n filters NaN
+
+
+def _can_access(user, trip):
+    if _is_admin(user):
+        return True
+    driver = _driver_for(user)
+    return bool(driver) and trip.driver_id == driver.id
+
+
+def _split_ref(purpose):
+    """Trips saved from the app store '<clientTripId>|<energy unit>' in `purpose`."""
+    ref, _, unit = (purpose or '').partition('|')
+    return ref, (unit or 'L')
+
+
+def _serialize(trip):
+    ref, unit = _split_ref(trip.purpose)
+    route = trip.routes[0] if trip.routes else None
+    done = trip.end_time
+    return {
+        'id': trip.id,
+        'tripId': ref or f'TRIP-{trip.id}',
+        'origin': trip.source,
+        'destination': trip.destination,
+        'load_weight_kg': trip.load_weight_kg,
+        'status': getattr(trip.status, 'value', str(trip.status)),
+        'title': route.route_label if route else None,
+        'distanceKm': route.distance_km if route else None,
+        'ecoScore': route.eco_score if route else None,
+        'fuelLiters': trip.actual_fuel_l,
+        'fuelUnit': unit,
+        'co2Kg': trip.actual_co2_kg,
+        'completedAtIso': done.replace(tzinfo=timezone.utc).isoformat() if done else None,
+        'completedAt': (done + IST).strftime('%d/%m/%Y, %I:%M:%S %p') if done else None,
+        'synced': True,
+    }
+
+
+# ── endpoints ────────────────────────────────────────────────────────────────
+
+@trips_bp.route('/', methods=['GET'])
+@jwt_required()
+def get_trips():
+    """Drivers see their own trips; admins see all."""
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'unauthorized'}), 401
+    q = Trip.query
+    if not _is_admin(user):
+        driver = _driver_for(user)
+        if not driver:
+            return jsonify([]), 200
+        q = q.filter_by(driver_id=driver.id)
+    return jsonify([_serialize(t) for t in q.order_by(Trip.id.desc()).limit(500).all()]), 200
+
+
+@trips_bp.route('/history', methods=['GET'])
+@jwt_required()
+def trip_history():
+    """Completed trips for the logged-in driver (admins: everyone)."""
+    user = _current_user()
+    if not user:
+        return jsonify({'error': 'unauthorized'}), 401
+    q = Trip.query.filter_by(status=TripStatus.completed)
+    if not _is_admin(user):
+        driver = _driver_for(user)
+        if not driver:
+            return jsonify({'trips': []}), 200
+        q = q.filter_by(driver_id=driver.id)
+    trips = q.order_by(Trip.end_time.desc()).limit(200).all()
+    return jsonify({'trips': [_serialize(t) for t in trips]}), 200
+
+
+@trips_bp.route('/complete', methods=['POST'])
+@jwt_required()
+def complete_trip():
+    """Save a finished trip. Safe to call twice for the same client trip id."""
+    user = _current_user()
+    driver = _driver_for(user)
+    if not driver:
+        return jsonify({'error': 'forbidden', 'message': 'Only drivers can complete trips'}), 403
+
+    data = request.get_json(silent=True) or {}
+    ref = str(data.get('tripId') or '').strip()[:60]
+    origin = str(data.get('origin') or '').strip()
+    destination = str(data.get('destination') or '').strip()
+    if not ref or not origin or not destination:
+        return jsonify({'error': 'validation_error', 'message': 'tripId, origin and destination are required'}), 422
+
+    existing = Trip.query.filter(Trip.driver_id == driver.id, Trip.purpose.like(f'{ref}|%')).first()
+    if existing:
+        return jsonify({'message': 'Trip already saved', 'trip': _serialize(existing)}), 200
+
+    vehicle = _vehicle_for(driver, data.get('vehicle_id'))
+    if not vehicle:
+        return jsonify({'error': 'no_vehicle', 'message': 'No vehicle is registered yet'}), 409
+
+    unit = str(data.get('fuelUnit') or 'L')[:8]
+    try:
+        trip = Trip(
+            driver_id=driver.id,
+            vehicle_id=vehicle.id,
+            source=origin[:255],
+            destination=destination[:255],
+            load_weight_kg=_num(data.get('loadWeightKg')),
+            purpose=f'{ref}|{unit}',
+            status=TripStatus.completed,
+            end_time=datetime.now(timezone.utc).replace(tzinfo=None),
+            actual_fuel_l=_num(data.get('fuelLiters')),
+            actual_co2_kg=_num(data.get('co2Kg')),
+        )
+        db.session.add(trip)
+        db.session.flush()
+        db.session.add(Route(
+            trip_id=trip.id,
+            route_label=str(data.get('title') or 'Route')[:50],
+            distance_km=_num(data.get('distanceKm')),
+            predicted_fuel_l=_num(data.get('fuelLiters')),
+            predicted_co2_kg=_num(data.get('co2Kg')),
+            eco_score=_num(data.get('ecoScore'), default=None, hi=100.0) if data.get('ecoScore') is not None else None,
+            is_recommended=False,
+        ))
+        db.session.commit()
+        return jsonify({'message': 'Trip saved', 'trip': _serialize(trip)}), 201
+    except Exception:
+        db.session.rollback()
+        return jsonify({'error': 'database_error', 'message': 'Could not save trip'}), 400
+
+
+@trips_bp.route('/create', methods=['POST'])
 @jwt_required()
 def create_trip():
-    """Phase 3: Creates a trip, calls maps/weather/predict, and returns candidate routes."""
-    user_id = get_jwt_identity()
-    driver = Driver.query.filter_by(user_id=user_id).first()
-    
+    """Create a pending trip for the logged-in driver."""
+    user = _current_user()
+    driver = _driver_for(user)
     if not driver:
-        return jsonify({"error": "forbidden", "message": "Only drivers can create trips"}), 403
-        
-    data = request.get_json() or {}
-    source = data.get('source')
-    destination = data.get('destination')
-    load_weight_kg = data.get('load_weight_kg', 0.0)
-    
-    if not source or not destination:
-        return jsonify({"error": "validation", "message": "Source and destination required"}), 422
-        
-    vehicle = Vehicle.query.filter_by(assigned_driver_id=driver.id).first()
+        return jsonify({'error': 'forbidden', 'message': 'Only drivers can create trips'}), 403
+
+    data = request.get_json(silent=True) or {}
+    origin = str(data.get('origin') or '').strip()
+    destination = str(data.get('destination') or '').strip()
+    if not origin or not destination:
+        return jsonify({'error': 'validation_error', 'message': 'origin and destination are required'}), 422
+
+    vehicle = _vehicle_for(driver, data.get('vehicle_id'))
     if not vehicle:
-        return jsonify({"error": "no_vehicle", "message": "You must be assigned a vehicle to create a trip"}), 400
+        return jsonify({'error': 'no_vehicle', 'message': 'No vehicle is registered yet'}), 409
 
-    # 1. Create Trip Record (Pending Route Selection)
-    trip = Trip(
-        driver_id=driver.id,
-        vehicle_id=vehicle.id,
-        source=source,
-        destination=destination,
-        load_weight_kg=float(load_weight_kg),
-        purpose=data.get('purpose'),
-        status=TripStatus.in_progress  # Will actually be 'pending_route' or just 'in_progress' until completed/cancelled
-    )
-    db.session.add(trip)
-    db.session.flush() # get trip.id
-    
-    # 2. Get Candidates & Weather
-    weather = get_current_weather(source)
-    candidates = get_candidate_routes(source, destination)
-    
-    routes_saved = []
-    best_eco = -1
-    best_route = None
-
-    # 3. Predict & Score
-    for idx, c in enumerate(candidates):
-        predictions = predict_trip_metrics(
-            distance_km=c['distance_km'],
-            vehicle_load_kg=trip.load_weight_kg,
-            traffic_density_str=c['traffic_density'],
-            weather_condition_str=weather['condition'],
-            vehicle_type_str=vehicle.type
+    try:
+        trip = Trip(
+            driver_id=driver.id,
+            vehicle_id=vehicle.id,
+            source=origin[:255],
+            destination=destination[:255],
+            load_weight_kg=_num(data.get('load_weight_kg')),
+            status=TripStatus.pending,
         )
-        
-        # Determine if AI recommended (temporarily flag the highest eco score)
-        if predictions['eco_score'] > best_eco:
-            best_eco = predictions['eco_score']
-            best_route = idx
-            
-        r = RouteModel(
-            trip_id=trip.id,
-            route_label=c['route_label'],
-            distance_km=c['distance_km'],
-            traffic_density=c['traffic_density'],
-            avg_speed=c['avg_speed'],
-            predicted_fuel_l=predictions['predicted_fuel_l'],
-            predicted_co2_kg=predictions['predicted_co2_kg'],
-            eco_score=predictions['eco_score'],
-            is_recommended=False
-        )
-        routes_saved.append(r)
-        
-    if best_route is not None:
-        routes_saved[best_route].is_recommended = True
-        
-    db.session.add_all(routes_saved)
-    db.session.commit()
-    
-    return jsonify({
-        "trip_id": trip.id,
-        "weather": weather,
-        "routes": [{
-            "id": r.id,
-            "route_label": r.route_label,
-            "distance_km": round(r.distance_km, 1),
-            "avg_speed": r.avg_speed,
-            "predicted_fuel_l": r.predicted_fuel_l,
-            "predicted_co2_kg": r.predicted_co2_kg,
-            "eco_score": r.eco_score,
-            "is_recommended": r.is_recommended,
-            "traffic_density": r.traffic_density
-        } for r in routes_saved]
-    }), 201
-
-
-@trips_bp.route('/<int:trip_id>', methods=['GET'])
-@jwt_required()
-def get_trip(trip_id):
-    trip = Trip.query.get(trip_id)
-    if not trip:
-        return jsonify({"error": "not_found", "message": "Trip not found"}), 404
-        
-    return jsonify({
-        "id": trip.id,
-        "source": trip.source,
-        "destination": trip.destination,
-        "status": trip.status.value,
-        "routes": [{
-            "id": r.id,
-            "route_label": r.route_label,
-            "distance_km": round(r.distance_km, 1),
-            "avg_speed": r.avg_speed,
-            "predicted_fuel_l": r.predicted_fuel_l,
-            "predicted_co2_kg": r.predicted_co2_kg,
-            "eco_score": r.eco_score,
-            "traffic_density": r.traffic_density,
-            "is_recommended": r.is_recommended
-        } for r in trip.routes]
-    }), 200
-
-
-@trips_bp.route('/<int:trip_id>/select-route', methods=['PATCH'])
-@jwt_required()
-def select_route(trip_id):
-    """Driver chooses a route."""
-    data = request.get_json() or {}
-    route_id = data.get('route_id')
-    
-    trip = Trip.query.get(trip_id)
-    if not trip:
-        return jsonify({"error": "not_found", "message": "Trip not found"}), 404
-        
-    # Save the selected route ID
-    trip.status = TripStatus.in_progress  # Technically "pending start" but we use in_progress
-    
-    # Optional: Mark the chosen route explicitly if needed.
-    # For now we'll just log it
-    db.session.commit()
-    return jsonify({"message": f"Route {route_id} selected for trip {trip_id}"}), 200
-
-
-@trips_bp.route('/<int:trip_id>/start', methods=['POST'])
-@jwt_required()
-def start_trip(trip_id):
-    """Marks a trip as started."""
-    trip = Trip.query.get(trip_id)
-    if not trip:
-        return jsonify({"error": "not_found", "message": "Trip not found"}), 404
-    
-    trip.status = TripStatus.in_progress
-    # In a real app we'd set actual_start_time
-    db.session.commit()
-    return jsonify({"message": "Trip started"}), 200
-
-
-@trips_bp.route('/<int:trip_id>/end', methods=['POST'])
-@jwt_required()
-def end_trip(trip_id):
-    """Ends a trip, computes actual vs predicted, updates driver eco score."""
-    data = request.get_json() or {}
-    trip = Trip.query.get(trip_id)
-    if not trip:
-        return jsonify({"error": "not_found", "message": "Trip not found"}), 404
-        
-    trip.status = TripStatus.completed
-    trip.actual_fuel_l = data.get('actual_fuel_l', 0.0)
-    trip.actual_co2_kg = data.get('actual_co2_kg', 0.0)
-    
-    # Update driver's average eco score based on this trip (simplified)
-    if trip.routes:
-        selected_route = trip.routes[0] # Simplification
-        trip_score = selected_route.eco_score
-        driver = trip.driver
-        if driver.eco_score is None or driver.eco_score == 0:
-            driver.eco_score = trip_score
-        else:
-            driver.eco_score = (driver.eco_score * 0.9) + (trip_score * 0.1)
-            
-    db.session.commit()
-    return jsonify({"message": "Trip completed"}), 200
-
-
-@trips_bp.route('/<int:trip_id>/log', methods=['POST'])
-@limiter.exempt  # This endpoint gets polled every few seconds during live tracking —
-                  # the global 500/hour limit was killing it mid-trip. Exempt it here
-                  # instead of raising the global limit for every other route too.
-@jwt_required()
-def log_gps(trip_id):
-    """Phase 4: GPS ping. Detects route deviation."""
-    from app.models import Notification, UserRole, User
-    data = request.get_json() or {}
-    lat = data.get('lat')
-    lng = data.get('lng')
-    is_deviated = data.get('is_deviated', False)
-    
-    trip = Trip.query.get(trip_id)
-    if not trip:
-        return jsonify({"error": "not_found"}), 404
-        
-    # If the frontend/mock sends a deviation flag (or if backend detects it from coords)
-    if is_deviated:
-        # Create notification for Driver
-        driver_notif = Notification(
-            user_id=trip.driver.user_id,
-            type="route_deviation",
-            title="Route Deviation Detected",
-            message=f"You have deviated from the eco-optimized route on Trip #{trip.id}."
-        )
-        db.session.add(driver_notif)
-        
-        # Create notification for all Admins
-        admins = User.query.filter_by(role=UserRole.admin).all()
-        for admin in admins:
-            admin_notif = Notification(
-                user_id=admin.id,
-                type="route_deviation",
-                title="Driver Route Deviation",
-                message=f"Driver {trip.driver.user.name} deviated from route on Trip #{trip.id}."
-            )
-            db.session.add(admin_notif)
-            
+        db.session.add(trip)
         db.session.commit()
-        return jsonify({"message": "Deviation logged, notifications sent"}), 200
-        
-    return jsonify({"message": "GPS logged"}), 200
+        return jsonify({'message': 'Trip created successfully', 'trip_id': trip.id}), 201
+    except Exception:
+        db.session.rollback()
+        return jsonify({'error': 'database_error', 'message': 'Could not create trip'}), 400
+
+
+@trips_bp.route('/<int:trip_id>/status', methods=['PATCH'])
+@jwt_required()
+def update_trip_status(trip_id):
+    user = _current_user()
+    data = request.get_json(silent=True) or {}
+    new_status = data.get('status')
+    if new_status not in [s.value for s in TripStatus]:
+        return jsonify({'error': 'validation_error',
+                        'message': f'status must be one of {[s.value for s in TripStatus]}'}), 422
+
+    trip = Trip.query.get(trip_id)
+    if not trip:
+        return jsonify({'error': 'not_found', 'message': 'Trip not found'}), 404
+    if not _can_access(user, trip):
+        return jsonify({'error': 'forbidden', 'message': 'Not your trip'}), 403
+
+    try:
+        trip.status = TripStatus(new_status)
+        db.session.commit()
+        return jsonify({'message': 'Trip status updated', 'trip_id': trip.id, 'status': new_status}), 200
+    except Exception:
+        db.session.rollback()
+        return jsonify({'error': 'update_error', 'message': 'Could not update trip'}), 400

@@ -3,6 +3,7 @@ import enum
 from datetime import datetime, timezone
 
 class TripStatus(enum.Enum):
+    pending = "pending"
     in_progress = "in_progress"
     completed = "completed"
     cancelled = "cancelled"

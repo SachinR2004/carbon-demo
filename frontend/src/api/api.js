@@ -18,7 +18,9 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
-    if (error.response.status === 401 && !originalRequest._retry) {
+    
+    // Optional chaining added to prevent crashes on network/server-offline errors
+    if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
       try {
         const refreshToken = localStorage.getItem('refresh_token');
@@ -39,4 +41,6 @@ api.interceptors.response.use(
   }
 );
 
+// Exporting both named { api } and default api to satisfy both import styles across all components
+export { api };
 export default api;

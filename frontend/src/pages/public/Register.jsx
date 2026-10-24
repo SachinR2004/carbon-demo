@@ -1,248 +1,420 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import Button from '../../components/Button';
-import Card from '../../components/Card';
-import { Leaf, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import api from '../../api/api';
+import { Upload, ShieldCheck, Truck, CheckCircle2, Eye, EyeOff } from 'lucide-react';
 
-const STEPS = ['Verify Email', 'Personal Info', 'Set Password', 'Done'];
+const apiMessage = (err, fallback) =>
+  err.response?.data?.message ||
+  (err.response?.status === 429 ? 'Too many attempts. Please wait a minute and try again.' : null) ||
+  (err.request ? 'Cannot reach the server. Check your connection and try again.' : fallback);
+
+const inputCls =
+  'w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-blue-600 bg-slate-50 text-slate-800';
+const labelCls = 'block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1';
 
 export default function Register() {
   const navigate = useNavigate();
-  const [step, setStep] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [demoOtp, setDemoOtp] = useState('');
-
-  const [form, setForm] = useState({
-    email: '', otp: '',
-    name: '', phone: '', dob: '', address: '',
-    license_no: '', experience_years: '', emergency_contact: '',
-    password: '', confirm_password: ''
+  const [role, setRole] = useState('DRIVER'); 
+  const [step, setStep] = useState(1); // 1: email, 2: otp, 3: details, 4: submitted
+  const [email, setEmail] = useState('');
+  const [otp, setOtp] = useState('');
+  
+  const [formData, setFormData] = useState({
+    fullName: '',
+    phone: '',
+    licenseNo: '',
+    experience: '',
+    fileName: '',
+    password: '',
   });
 
-  const set = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }));
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [showPw, setShowPw] = useState(false);
+  const [file, setFile] = useState(null);
 
-  const inputClass = "w-full px-4 py-2 rounded-xl border border-neutral-border focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-sm";
-  const labelClass = "block text-xs font-semibold text-neutral-textMuted mb-1 uppercase tracking-wide";
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
-  // ── Step 0: Request OTP ────────────────────────────────────────────────────
-  async function requestOtp(e) {
-    e.preventDefault();
-    setError(''); setLoading(true);
-    try {
-      const res = await api.post('/auth/request-otp', { email: form.email });
-      if (res.data.demo_otp) setDemoOtp(res.data.demo_otp);
-      setStep(0.5); // OTP sent — show verify sub-step
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to send OTP');
-    } finally { setLoading(false); }
-  }
+  const handlePhoneChange = (e) => {
+    const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+    setFormData({ ...formData, phone: val });
+  };
 
-  async function verifyOtp(e) {
-    e.preventDefault();
-    setError(''); setLoading(true);
-    try {
-      await api.post('/auth/verify-otp', { email: form.email, otp: form.otp });
-      setStep(1);
-    } catch (err) {
-      setError(err.response?.data?.message || 'Invalid OTP');
-    } finally { setLoading(false); }
-  }
+  const handleLicenseChange = (e) => {
+    const val = e.target.value.toUpperCase().slice(0, 15);
+    setFormData({ ...formData, licenseNo: val });
+  };
 
-  // ── Step 1: Personal info ─────────────────────────────────────────────────
-  function submitPersonal(e) {
+  const handleRequestOtp = async (e) => {
     e.preventDefault();
     setError('');
-    if (!form.name || !form.phone || !form.license_no) {
-      setError('Name, phone and license number are required'); return;
-    }
-    setStep(2);
-  }
-
-  // ── Step 2: Password ──────────────────────────────────────────────────────
-  async function submitRegistration(e) {
-    e.preventDefault();
-    setError('');
-    if (form.password !== form.confirm_password) {
-      setError('Passwords do not match'); return;
-    }
-    if (form.password.length < 8) {
-      setError('Password must be at least 8 characters'); return;
-    }
     setLoading(true);
+
     try {
-      await api.post('/auth/register', {
-        email: form.email,
-        otp: form.otp,
-        name: form.name,
-        phone: form.phone,
-        dob: form.dob || undefined,
-        address: form.address || undefined,
-        license_no: form.license_no,
-        experience_years: form.experience_years ? parseInt(form.experience_years) : undefined,
-        emergency_contact: form.emergency_contact || undefined,
-        password: form.password,
-      });
+      const res = await api.post('/auth/send-otp', { email: email.trim(), role });
+      setCooldown(res.data.resend_after || 60);
+      setStep(2);
+    } catch (err) {
+      if (err.response?.data?.retry_after) setCooldown(err.response.data.retry_after);
+      setError(apiMessage(err, 'Could not send verification code. Please check your email.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      await api.post('/auth/verify-otp', { email: email.trim(), otp: otp.trim() });
       setStep(3);
     } catch (err) {
-      setError(err.response?.data?.message || 'Registration failed. Please try again.');
-    } finally { setLoading(false); }
-  }
+      setError(apiMessage(err, 'Invalid or expired verification code.'));
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  // ── Progress bar ──────────────────────────────────────────────────────────
-  const displayStep = step === 0.5 ? 0 : Math.floor(step);
+  const handleFileChange = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 5 * 1024 * 1024) {
+      setError('License document must be 5 MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    setError('');
+    setFile(f);
+    setFormData({ ...formData, fileName: f.name });
+  };
+
+  const handleCompleteRegistration = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    if (formData.password.length < 8 || !/[A-Za-z]/.test(formData.password) || !/\d/.test(formData.password)) {
+      setError('Password needs at least 8 characters, including a letter and a number.');
+      return;
+    }
+    if (formData.phone.length !== 10) {
+      setError('Phone number must be exactly 10 digits.');
+      return;
+    }
+    if (!file) {
+      setError('Please upload your commercial license document.');
+      return;
+    }
+
+    setLoading(true);
+    localStorage.clear();
+
+    const body = new FormData();
+    body.append('email', email.trim());
+    body.append('otp', otp.trim());
+    body.append('name', formData.fullName.trim());
+    body.append('phone', formData.phone);
+    body.append('license_no', formData.licenseNo);
+    body.append('experience_years', formData.experience || '0');
+    body.append('password', formData.password);
+    body.append('license_doc', file);
+
+    try {
+      await api.post('/auth/register', body);
+      setStep(4);
+    } catch (err) {
+      const code = err.response?.data?.error;
+      if (code === 'invalid_otp' || code === 'otp_locked') setStep(2);
+      setError(apiMessage(err, 'Registration failed. Please check your inputs.'));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-primary/5 via-white to-sky/5 flex flex-col items-center justify-center px-4 py-12">
-      {/* Logo */}
-      <Link to="/" className="flex items-center gap-2 mb-8">
-        <Leaf className="text-eco w-7 h-7" />
-        <span className="text-2xl font-extrabold text-primary">GoGreen</span>
-      </Link>
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6 font-sans">
+      <div className="mb-6 text-center">
+        <div className="flex items-center justify-center gap-2 mb-1">
+          <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.4 19 2c2 2 2.6 3.5 3.7 9.2A7 7 0 0 1 13 20.2z"></path>
+            <path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.5 12 13 13 11"></path>
+          </svg>
+          <h1 className="text-xl font-black text-slate-900 tracking-tight">
+            <span className="text-blue-600">GoGreen</span> Logistics
+          </h1>
+        </div>
+        <p className="text-xs text-slate-500 font-medium">
+          {role === 'DRIVER' ? 'New Commercial Driver Onboarding' : 'Fleet Administrator Registration'}
+        </p>
+      </div>
 
-      <div className="w-full max-w-lg">
-        {/* Step progress */}
-        {step < 3 && (
-          <div className="flex items-center mb-8">
-            {STEPS.slice(0, 3).map((label, i) => (
-              <React.Fragment key={label}>
-                <div className="flex flex-col items-center">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-colors ${
-                    i < displayStep ? 'bg-eco text-white' : i === displayStep ? 'bg-primary text-white' : 'bg-neutral-border text-neutral-textMuted'
-                  }`}>
-                    {i < displayStep ? <CheckCircle size={16} /> : i + 1}
-                  </div>
-                  <span className="text-xs mt-1 text-neutral-textMuted hidden sm:block">{label}</span>
-                </div>
-                {i < 2 && <div className={`flex-1 h-0.5 mx-2 ${i < displayStep ? 'bg-eco' : 'bg-neutral-border'}`} />}
-              </React.Fragment>
-            ))}
+      {step < 4 && (
+        <div className="max-w-md w-full flex items-center justify-between mb-8 px-4">
+          <div className="flex items-center gap-2">
+            <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black ${step >= 1 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>1</div>
+            <span className={`text-xs font-bold ${step === 1 ? 'text-slate-900' : 'text-slate-400'}`}>Verify Email</span>
           </div>
+          <div className="flex-1 h-0.5 bg-slate-200 mx-3" />
+          <div className="flex items-center gap-2">
+            <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black ${step >= 2 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>2</div>
+            <span className={`text-xs font-bold ${step === 2 ? 'text-slate-900' : 'text-slate-400'}`}>Details & Docs</span>
+          </div>
+          <div className="flex-1 h-0.5 bg-slate-200 mx-3" />
+          <div className="flex items-center gap-2">
+            <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-black ${step >= 3 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>3</div>
+            <span className={`text-xs font-bold ${step === 3 ? 'text-slate-900' : 'text-slate-400'}`}>Password</span>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-xl w-full bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6">
+        {error && (
+          <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold">{error}</div>
         )}
 
-        <Card>
-          {/* Error */}
-          {error && (
-            <div className="flex items-center gap-2 bg-danger/10 text-danger text-sm p-3 rounded-xl mb-4 border border-danger/20">
-              <AlertCircle size={16} /> {error}
+        {step === 1 && (
+          <form onSubmit={handleRequestOtp} className="space-y-5">
+            <div>
+              <h2 className="text-xl font-black text-slate-900">Create your account</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Select your system role and enter your professional email.</p>
             </div>
-          )}
 
-          {/* ── STEP 0: email input ─────────────────────────────────────── */}
-          {step === 0 && (
-            <form onSubmit={requestOtp}>
-              <h2 className="text-xl font-bold text-neutral-textMain mb-1">Create your account</h2>
-              <p className="text-sm text-neutral-textMuted mb-6">Enter your email to receive a one-time verification code.</p>
-              <label className={labelClass}>Email address</label>
-              <input type="email" className={inputClass} value={form.email} onChange={set('email')} required />
-              <Button type="submit" className="w-full mt-5" disabled={loading}>
-                {loading ? <Loader className="animate-spin" size={16} /> : 'Send OTP'}
-              </Button>
-              <p className="text-center text-sm text-neutral-textMuted mt-4">
-                Already have an account? <Link to="/login" className="text-primary hover:underline">Sign in</Link>
-              </p>
-            </form>
-          )}
-
-          {/* ── STEP 0.5: OTP verify ────────────────────────────────────── */}
-          {step === 0.5 && (
-            <form onSubmit={verifyOtp}>
-              <h2 className="text-xl font-bold text-neutral-textMain mb-1">Check your email</h2>
-              <p className="text-sm text-neutral-textMuted mb-4">We sent a code to <strong>{form.email}</strong></p>
-              {demoOtp && (
-                <div className="bg-sky/10 border border-sky/30 text-sky rounded-xl p-3 text-sm mb-4 font-mono">
-                  🔧 Demo Mode — OTP: <strong>{demoOtp}</strong>
-                </div>
-              )}
-              <label className={labelClass}>6-digit code</label>
-              <input type="text" className={`${inputClass} tracking-widest text-center text-xl`} maxLength={6}
-                value={form.otp} onChange={set('otp')} placeholder="------" required />
-              <Button type="submit" className="w-full mt-5" disabled={loading}>
-                {loading ? <Loader className="animate-spin" size={16} /> : 'Verify OTP'}
-              </Button>
-              <button type="button" onClick={() => setStep(0)} className="w-full text-sm text-neutral-textMuted mt-3 hover:text-primary">
-                ← Change email
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setRole('DRIVER')}
+                className={`p-3 rounded-xl border flex items-center justify-center gap-2 text-xs font-extrabold transition cursor-pointer ${
+                  role === 'DRIVER' ? 'bg-blue-50 border-blue-600 text-blue-700 shadow-xs' : 'bg-slate-50 border-slate-200 text-slate-600'
+                }`}
+              >
+                <Truck size={16} /> Driver Portal
               </button>
-            </form>
-          )}
-
-          {/* ── STEP 1: personal info ────────────────────────────────────── */}
-          {step === 1 && (
-            <form onSubmit={submitPersonal}>
-              <h2 className="text-xl font-bold text-neutral-textMain mb-5">Personal Information</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="sm:col-span-2">
-                  <label className={labelClass}>Full Name *</label>
-                  <input className={inputClass} value={form.name} onChange={set('name')} required />
-                </div>
-                <div>
-                  <label className={labelClass}>Phone Number *</label>
-                  <input className={inputClass} value={form.phone} onChange={set('phone')} required />
-                </div>
-                <div>
-                  <label className={labelClass}>Date of Birth</label>
-                  <input type="date" className={inputClass} value={form.dob} onChange={set('dob')} />
-                </div>
-                <div>
-                  <label className={labelClass}>License Number *</label>
-                  <input className={inputClass} value={form.license_no} onChange={set('license_no')} required />
-                </div>
-                <div>
-                  <label className={labelClass}>Years of Experience</label>
-                  <input type="number" min="0" max="50" className={inputClass} value={form.experience_years} onChange={set('experience_years')} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={labelClass}>Address</label>
-                  <textarea rows={2} className={`${inputClass} resize-none`} value={form.address} onChange={set('address')} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={labelClass}>Emergency Contact</label>
-                  <input className={inputClass} placeholder="Name and phone number" value={form.emergency_contact} onChange={set('emergency_contact')} />
-                </div>
-              </div>
-              <Button type="submit" className="w-full mt-6">Continue →</Button>
-            </form>
-          )}
-
-          {/* ── STEP 2: password ─────────────────────────────────────────── */}
-          {step === 2 && (
-            <form onSubmit={submitRegistration}>
-              <h2 className="text-xl font-bold text-neutral-textMain mb-5">Set Your Password</h2>
-              <div className="flex flex-col gap-4">
-                <div>
-                  <label className={labelClass}>Password</label>
-                  <input type="password" className={inputClass} value={form.password} onChange={set('password')} required minLength={8} />
-                  <p className="text-xs text-neutral-textMuted mt-1">Minimum 8 characters</p>
-                </div>
-                <div>
-                  <label className={labelClass}>Confirm Password</label>
-                  <input type="password" className={inputClass} value={form.confirm_password} onChange={set('confirm_password')} required />
-                </div>
-              </div>
-              <div className="flex gap-3 mt-6">
-                <Button type="button" variant="outline" onClick={() => setStep(1)} className="flex-1">← Back</Button>
-                <Button type="submit" className="flex-1" disabled={loading}>
-                  {loading ? <Loader className="animate-spin" size={16} /> : 'Submit Application'}
-                </Button>
-              </div>
-            </form>
-          )}
-
-          {/* ── STEP 3: success ──────────────────────────────────────────── */}
-          {step === 3 && (
-            <div className="text-center py-4">
-              <div className="w-16 h-16 bg-eco/10 rounded-full flex items-center justify-center mx-auto mb-4">
-                <CheckCircle className="text-eco w-8 h-8" />
-              </div>
-              <h2 className="text-xl font-bold text-neutral-textMain mb-2">Application Submitted!</h2>
-              <p className="text-sm text-neutral-textMuted mb-6">
-                Your driver registration is pending admin approval. You'll be notified once reviewed.
-              </p>
-              <Link to="/login"><Button variant="primary" className="w-full">Go to Login</Button></Link>
+              <button
+                type="button"
+                onClick={() => setRole('ADMIN')}
+                className={`p-3 rounded-xl border flex items-center justify-center gap-2 text-xs font-extrabold transition cursor-pointer ${
+                  role === 'ADMIN' ? 'bg-blue-50 border-blue-600 text-blue-700 shadow-xs' : 'bg-slate-50 border-slate-200 text-slate-600'
+                }`}
+              >
+                <ShieldCheck size={16} /> Admin Portal
+              </button>
             </div>
-          )}
-        </Card>
+
+            <div>
+              <label className={labelCls}>Email Address *</label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@gogreen.com"
+                className={inputCls}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              {loading ? 'Dispatching OTP...' : 'Send Verification OTP ➔'}
+            </button>
+
+            <div className="text-center pt-2 border-t border-slate-100">
+              <span className="text-xs text-slate-500">
+                Already have an account? <Link to="/login" className="text-blue-600 font-bold hover:underline">Sign in</Link>
+              </span>
+            </div>
+          </form>
+        )}
+
+        {step === 2 && (
+          <form onSubmit={handleVerifyOtp} className="space-y-5">
+            <div>
+              <h2 className="text-xl font-black text-slate-900">Verify Email OTP</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Verification code dispatched to <span className="font-bold text-slate-800">{email}</span>. It expires in 5 minutes.
+              </p>
+            </div>
+
+            <div>
+              <label className={labelCls}>6-Digit Verification Code *</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                required
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="000000"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm font-mono tracking-widest font-black text-center focus:outline-none focus:ring-2 focus:ring-blue-600 bg-slate-50 text-slate-800"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || otp.length !== 6}
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              {loading ? 'Verifying...' : 'Verify & Proceed ➔'}
+            </button>
+
+            <div className="flex items-center justify-between text-xs font-bold pt-2">
+              <button
+                type="button"
+                onClick={() => { setStep(1); setOtp(''); setError(''); }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                ← Change email address
+              </button>
+              <button
+                type="button"
+                disabled={cooldown > 0 || loading}
+                onClick={handleRequestOtp}
+                className="text-blue-600 disabled:text-slate-300 cursor-pointer"
+              >
+                {cooldown > 0 ? `Resend code in ${cooldown}s` : 'Resend code'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {step === 3 && (
+          <form onSubmit={handleCompleteRegistration} className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-slate-900">
+                {role === 'DRIVER' ? 'Driver Credentials & Compliance' : 'Administrator Credentials'}
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">Provide regulatory details and compliance documentation.</p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.fullName}
+                  onChange={(e) => setFormData({ ...formData, fullName: e.target.value })}
+                  placeholder="Enter full name"
+                  className={inputCls}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Phone Number (10 Digits Strict) *</label>
+                <input
+                  type="text"
+                  required
+                  maxLength={10}
+                  value={formData.phone}
+                  onChange={handlePhoneChange}
+                  placeholder="9876543210"
+                  className={`${inputCls} font-mono`}
+                />
+              </div>
+            </div>
+
+            {role === 'DRIVER' && (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Heavy License Number (Uppercase) *</label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={15}
+                      value={formData.licenseNo}
+                      onChange={handleLicenseChange}
+                      placeholder="KA0520230098412"
+                      className={`${inputCls} font-mono tracking-wider`}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Years of Experience</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="60"
+                      value={formData.experience}
+                      onChange={(e) => setFormData({ ...formData, experience: e.target.value })}
+                      placeholder="e.g. 3"
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className={labelCls}>
+                    Upload Commercial License / Permit (PDF, JPG, PNG · max 5 MB) *
+                  </label>
+                  <label className="border-2 border-dashed border-slate-200 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer hover:border-blue-500 bg-slate-50 transition">
+                    <Upload size={20} className="text-blue-600 mb-1" />
+                    <span className="text-xs font-bold text-slate-700">
+                      {file ? file.name : 'Click to browse or drop document here'}
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-0.5">Supported formats: PDF, PNG, JPG (Max 5MB)</span>
+                    <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFileChange} className="hidden" />
+                  </label>
+                </div>
+              </>
+            )}
+
+            <div>
+              <label className={labelCls}>Secure Password *</label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  required
+                  autoComplete="new-password"
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  placeholder="••••••••"
+                  className={`${inputCls} pr-10`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPw((v) => !v)}
+                  className="absolute right-3 top-2.5 text-slate-400 cursor-pointer"
+                  aria-label="Toggle password visibility"
+                >
+                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">At least 8 characters with a letter and a number.</p>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2 mt-2"
+            >
+              {loading ? 'Submitting...' : '✓ Complete Onboarding & Submit for Approval'}
+            </button>
+          </form>
+        )}
+
+        {step === 4 && (
+          <div className="text-center space-y-4 py-4">
+            <CheckCircle2 size={44} className="text-emerald-500 mx-auto" />
+            <h2 className="text-xl font-black text-slate-900">Application submitted</h2>
+            <p className="text-sm text-slate-500">
+              An administrator will review your license. You can sign in as soon as your account is approved.
+            </p>
+            <button
+              onClick={() => navigate('/login')}
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs rounded-xl shadow-md cursor-pointer"
+            >
+              Go to Sign In
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

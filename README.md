@@ -1,49 +1,60 @@
-# GoGreen Fleet AI
+🌱 GoGreen — AI-Driven Eco-Friendly Fleet Routing Platform
 
-GoGreen Fleet AI is a full-stack platform for predictive logistics and sustainability tracking. It uses Machine Learning (RandomForestRegressor) to predict fuel consumption and CO₂ emissions, suggesting the most eco-friendly routes for delivery drivers.
+An intelligent logistics and fleet routing platform that calculates optimal driving paths, predicts fuel consumption and $CO_2$ emissions using Machine Learning, tracks live GPS positions, and provides smart route suggestions.
 
-## Project Structure
-- `/backend`: Flask REST API serving ML inferences, JWT Auth, and Admin metrics.
-- `/frontend`: React application built with Vite and TailwindCSS v3.
-- `/backend/app/ml`: Scikit-Learn training pipelines and `.joblib` models.
 
-## Default Demo Accounts
-- **Admin**: `admin@gogreen.com` | `Pass123!`
-- **Driver**: `driver@gogreen.com` | `Pass123!`
+📁 Project Architecture Overview
 
-## Environment Variables
-See `backend/.env.example` and `frontend/.env.example` for details.
+GoGreen/
+├── backend/            # Flask REST API + Python ML Models + SQLite Database
+│   ├── app/
+│   ├── instance/
+│   ├── run.py
+│   └── requirements.txt
+└── frontend/           # React + Vite + Leaflet Maps + Tailwind CSS
+    ├── src/
+    ├── package.json
+    └── vite.config.js
 
-## Running the App
 
-### 1. Backend (Flask)
-```bash
+    Quick Start Setup Guide (Windows)
+1️⃣ Setting Up the Backend (Python & Flask)
+
+# Navigate to backend directory
 cd backend
-# Create and activate a virtual environment
-python -m venv venv
-.\venv\Scripts\activate   # Windows
-# source venv/bin/activate # macOS/Linux
 
-# Install dependencies
+# Create a virtual environment
+python -m venv venv
+
+# Activate the virtual environment on Windows
+venv\Scripts\activate
+
+# Upgrade pip (Recommended)
+python -m pip install --upgrade pip
+
+# Install required Python dependencies
 pip install -r requirements.txt
 
-# Run the backend server
+# Run the Flask backend server
 python run.py
-```
+.
+.
+.
+.
+Setting Up the Frontend (React & Vite)
 
-### 2. Frontend (React + Vite)
-```bash
+# Navigate into the frontend folder
 cd frontend
-# Install dependencies
+
+# Install Node.js dependencies
 npm install
 
-# Run the development server
+# Start the Vite development server
 npm run dev
-```
 
-## API Summary
-- `POST /api/v1/auth/login`: Authenticate and receive JWT.
-- `GET /api/v1/admin/stats`: Get system-wide fleet metrics.
-- `GET /api/v1/ai/fleet-health`: ML model performance and maintenance risks.
-- `POST /api/v1/trips/<id>/log`: Send active trip telemetry (GPS pings).
-- `GET /api/v1/reports/export/pdf`: Download executive summary.
+
+
+⚙️ Environment Variables Setup (.env)
+If the frontend fails to connect to the backend, make sure a .env file exists inside the frontend/ folder with the following line:
+
+VITE_API_BASE_URL=http://localhost:5000/api/v1

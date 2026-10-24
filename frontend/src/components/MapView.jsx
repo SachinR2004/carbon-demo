@@ -1,179 +1,163 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Polyline, useMap } from 'react-leaflet';
+import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { AlertTriangle, Loader } from 'lucide-react';
 
-// Leaflet's default marker icon paths don't resolve correctly through Vite's
-// bundler, so we point them at a CDN instead of bundling the images locally.
-const defaultIcon = new L.Icon({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
-
-const youAreHereIcon = new L.DivIcon({
-  className: '',
-  html: '<div style="width:16px;height:16px;border-radius:50%;background:#2563eb;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,0.5)"></div>',
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
-});
-
-// Free OSM geocoder (Nominatim) — turns an address string into { lat, lng }.
-// Works worldwide, including India.
-async function geocodeAddress(address) {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
-  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
-  if (!res.ok) throw new Error('Geocoding failed');
-  const data = await res.json();
-  if (!data.length) throw new Error('Address not found');
-  return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+function bearingBetween(p1, p2) {
+  const lat1 = (p1[0] * Math.PI) / 180;
+  const lon1 = (p1[1] * Math.PI) / 180;
+  const lat2 = (p2[0] * Math.PI) / 180;
+  const lon2 = (p2[1] * Math.PI) / 180;
+  const y = Math.sin(lon2 - lon1) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(lon2 - lon1);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
-// Free public OSRM routing server — real driving directions, worldwide, no key.
-async function getDrivingRoute(origin, destination) {
-  const url = `https://router.project-osrm.org/route/v1/driving/${origin.lng},${origin.lat};${destination.lng},${destination.lat}?overview=full&geometries=geojson`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('Routing failed');
-  const data = await res.json();
-  if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route found');
-  const route = data.routes[0];
-  return {
-    positions: route.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
-    distanceMeters: route.distance,
-    durationSeconds: route.duration,
-  };
+// Fallback heading when the device gives none: direction of the road ahead.
+function roadBearing(currentPos, path) {
+  if (!path || path.length < 2 || !currentPos) return 0;
+  let closest = 0;
+  let min = Infinity;
+  for (let i = 0; i < path.length; i++) {
+    const d = (path[i][0] - currentPos[0]) ** 2 + (path[i][1] - currentPos[1]) ** 2;
+    if (d < min) { min = d; closest = i; }
+  }
+  const next = Math.min(closest + 1, path.length - 1);
+  return closest === next ? 0 : bearingBetween(path[closest], path[next]);
 }
 
-// Refits the map's view whenever the set of points we care about changes.
-function FitBounds({ positions }) {
-  const map = useMap();
+const pin = (color, label) =>
+  L.divIcon({
+    className: '',
+    html: `<div style="width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:${color};border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center"><span style="transform:rotate(45deg);color:#fff;font:700 12px sans-serif">${label}</span></div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 30],
+  });
+
+const isPoint = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]);
+
+export default function MapView({
+  routes = [],
+  selectedRouteId,
+  originCoords,          // [lat, lng] optional start pin
+  destinationCoords,     // [lat, lng] optional end pin
+  currentLocation,       // [lat, lng]
+  accuracyM,             // GPS accuracy circle radius in metres (optional)
+  heading = 0,
+  autoCenterOnGps = false,
+  onUserInteract,        // called when the user drags/zooms the map (so the page can stop auto-follow)
+}) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+  const routeGroupRef = useRef(null);
+  const markerGroupRef = useRef(null);
+  const vehicleRef = useRef(null);
+  const accuracyRef = useRef(null);
+  const fittedKeyRef = useRef('');
+  const interactRef = useRef(onUserInteract);
+  interactRef.current = onUserInteract;
+
+  // create the map once
   useEffect(() => {
-    if (!positions || positions.length === 0) return;
-    if (positions.length === 1) {
-      map.setView(positions[0], 13);
-    } else {
-      map.fitBounds(positions, { padding: [30, 30] });
+    if (!containerRef.current) return undefined;
+    const map = L.map(containerRef.current, { zoomControl: false }).setView([12.9716, 77.5946], 14);
+    // OpenStreetMap's tile policy requires attribution to stay visible.
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    L.control.zoom({ position: 'topright' }).addTo(map);
+    routeGroupRef.current = L.layerGroup().addTo(map);
+    markerGroupRef.current = L.layerGroup().addTo(map);
+    // only real user gestures (not our own panTo) stop auto-follow
+    map.on('dragstart', () => interactRef.current?.());
+    map.on('zoomstart', (e) => { if (e.originalEvent) interactRef.current?.(); });
+    mapRef.current = map;
+    return () => {
+      map.remove();
+      mapRef.current = null;
+      routeGroupRef.current = null;
+      markerGroupRef.current = null;
+      vehicleRef.current = null;   // reset, otherwise a remounted map keeps a marker from the dead one
+      accuracyRef.current = null;
+      fittedKeyRef.current = '';
+    };
+  }, []);
+
+  // route lines + start/end pins
+  useEffect(() => {
+    const map = mapRef.current;
+    const group = routeGroupRef.current;
+    if (!map || !group) return;
+    group.clearLayers();
+    const all = [];
+    routes.forEach((route) => {
+      if (!route.pathPoints?.length) return;
+      const selected = route.id === selectedRouteId || routes.length === 1;
+      group.addLayer(L.polyline(route.pathPoints, { color: selected ? '#2563eb' : '#94a3b8', weight: selected ? 6 : 4, opacity: 0.9 }));
+      route.pathPoints.forEach((p) => all.push(p));
+    });
+    const start = isPoint(originCoords) ? originCoords : all[0];
+    const end = isPoint(destinationCoords) ? destinationCoords : all[all.length - 1];
+    if (isPoint(start) && all.length) group.addLayer(L.marker(start, { icon: pin('#16a34a', 'A'), interactive: false }));
+    if (isPoint(end) && all.length) group.addLayer(L.marker(end, { icon: pin('#dc2626', 'B'), interactive: false }));
+
+    // fit the view when the route itself changes (not on every GPS tick)
+    const key = `${all.length}:${all[0]}:${all[all.length - 1]}`;
+    if (all.length && key !== fittedKeyRef.current) {
+      fittedKeyRef.current = key;
+      map.fitBounds(L.latLngBounds(all), { padding: [60, 60], maxZoom: 16 });
     }
-  }, [positions, map]);
-  return null;
-}
+  }, [routes, selectedRouteId, originCoords, destinationCoords]);
 
-/**
- * Real interactive map using OpenStreetMap tiles + the free OSRM routing
- * engine. No API key, no billing account, works worldwide (including India).
- * - Pass `origin` + `destination` (address strings) to draw an actual driving route.
- * - Otherwise pass `markers` ([{ lat, lng, label }]) to drop pins (e.g. live driver positions).
- * - Pass `currentPosition` ({ lat, lng }) to drop a live "you are here" marker on top of a route.
- * - Pass `onRouteInfo` to receive { distanceMeters, durationSeconds, startLocation, endLocation }
- *   once a route resolves — useful for computing real trip progress.
- */
-export default function MapView({ routes = [], center = { lat: 40.7128, lng: -74.006 }, zoom = 12, markers = [], origin, destination, currentPosition, onRouteInfo }) {
-  const [routeData, setRouteData] = useState(null);
-  const [routeError, setRouteError] = useState(false);
-  const [loadingRoute, setLoadingRoute] = useState(false);
-
-  const wantsDirections = Boolean(origin && destination);
-
+  // vehicle marker + accuracy circle
   useEffect(() => {
-    setRouteData(null);
-    setRouteError(false);
+    const map = mapRef.current;
+    const group = markerGroupRef.current;
+    if (!map || !group) return;
 
-    if (!wantsDirections) return;
+    if (!isPoint(currentLocation)) {
+      if (vehicleRef.current) { group.removeLayer(vehicleRef.current); vehicleRef.current = null; }
+      if (accuracyRef.current) { group.removeLayer(accuracyRef.current); accuracyRef.current = null; }
+      return;
+    }
 
-    let cancelled = false;
-    setLoadingRoute(true);
+    const path = (routes.find((r) => r.id === selectedRouteId) || routes[0])?.pathPoints || [];
+    const angle = heading || roadBearing(currentLocation, path);
+    const icon = L.divIcon({
+      className: 'vehicle-marker',
+      html: `<div style="transform:rotate(${angle}deg);transition:transform .4s ease-out;width:44px;height:44px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 4px 8px rgba(0,0,0,.4))"><svg width="40" height="40" viewBox="0 0 24 24" fill="#2563eb" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"><polygon points="12 2 19 21 12 17 5 21 12 2"/></svg></div>`,
+      iconSize: [44, 44],
+      iconAnchor: [22, 22],
+    });
+    if (!vehicleRef.current) {
+      vehicleRef.current = L.marker(currentLocation, { icon, zIndexOffset: 1000, interactive: false }).addTo(group);
+    } else {
+      vehicleRef.current.setLatLng(currentLocation);
+      vehicleRef.current.setIcon(icon);
+    }
 
-    (async () => {
-      try {
-        const [originPt, destPt] = await Promise.all([
-          geocodeAddress(origin),
-          geocodeAddress(destination),
-        ]);
-        const route = await getDrivingRoute(originPt, destPt);
-        if (cancelled) return;
-        setRouteData(route);
-        if (onRouteInfo) {
-          onRouteInfo({
-            distanceMeters: route.distanceMeters,
-            durationSeconds: route.durationSeconds,
-            startLocation: originPt,
-            endLocation: destPt,
-          });
-        }
-      } catch (e) {
-        if (!cancelled) setRouteError(true);
-      } finally {
-        if (!cancelled) setLoadingRoute(false);
+    if (Number.isFinite(accuracyM) && accuracyM > 0) {
+      if (!accuracyRef.current) {
+        accuracyRef.current = L.circle(currentLocation, { radius: accuracyM, color: '#2563eb', weight: 1, fillOpacity: 0.1, interactive: false }).addTo(group);
+      } else {
+        accuracyRef.current.setLatLng(currentLocation);
+        accuracyRef.current.setRadius(accuracyM);
       }
-    })();
+    } else if (accuracyRef.current) {
+      group.removeLayer(accuracyRef.current);
+      accuracyRef.current = null;
+    }
 
-    return () => { cancelled = true; };
-  }, [origin, destination, wantsDirections, onRouteInfo]);
-
-  const markerPositions = useMemo(() => markers.map(m => [m.lat, m.lng]), [markers]);
-
-  const fitPositions = wantsDirections
-    ? (routeData?.positions || [])
-    : (markers.length > 0 ? markerPositions : [[center.lat, center.lng]]);
+    if (autoCenterOnGps) {
+      // follow the vehicle but never fight the user's zoom: only zoom in if we're far out
+      if (map.getZoom() < 15) map.setView(currentLocation, 16, { animate: true });
+      else map.panTo(currentLocation, { animate: true, duration: 0.5 });
+    }
+  }, [currentLocation, accuracyM, heading, autoCenterOnGps, routes, selectedRouteId]);
 
   return (
-    <div className="relative w-full h-full min-h-[300px] rounded-2xl overflow-hidden border border-neutral-border">
-      <MapContainer
-        center={[center.lat, center.lng]}
-        zoom={zoom}
-        style={{ width: '100%', height: '100%', minHeight: 300 }}
-        scrollWheelZoom={true}
-      >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-
-        {wantsDirections && routeData && (
-          <>
-            <Polyline positions={routeData.positions} pathOptions={{ color: '#16a34a', weight: 5, opacity: 0.85 }} />
-            <Marker position={routeData.positions[0]} icon={defaultIcon} />
-            <Marker position={routeData.positions[routeData.positions.length - 1]} icon={defaultIcon} />
-          </>
-        )}
-
-        {!wantsDirections && markers.map((m, i) => (
-          <Marker key={i} position={[m.lat, m.lng]} icon={defaultIcon} />
-        ))}
-
-        {!wantsDirections && markers.length === 0 && (
-          <Marker position={[center.lat, center.lng]} icon={defaultIcon} />
-        )}
-
-        {currentPosition && (
-          <Marker position={[currentPosition.lat, currentPosition.lng]} icon={youAreHereIcon} />
-        )}
-
-        <FitBounds positions={fitPositions} />
-      </MapContainer>
-
-      {wantsDirections && loadingRoute && (
-        <div className="absolute inset-0 bg-white/70 flex items-center justify-center z-[1000]">
-          <Loader className="animate-spin text-primary" size={28} />
-        </div>
-      )}
-
-      {wantsDirections && routeError && (
-        <div className="absolute inset-0 bg-white/90 flex flex-col items-center justify-center text-center p-6 z-[1000]">
-          <AlertTriangle className="mb-2 text-warning" size={28} />
-          <p className="font-semibold text-neutral-textMain">Couldn't find a route</p>
-          <p className="text-xs text-neutral-textMuted mt-1">Try more specific addresses for "{origin}" and "{destination}".</p>
-        </div>
-      )}
-
-      <div className="absolute top-2 left-2 bg-primary-light text-white px-3 py-1 rounded-full text-xs font-bold shadow-md z-[1000]">
-        {routes.length > 0 ? `${routes.length} Candidate Route${routes.length > 1 ? 's' : ''}` : 'Live Map'}
-      </div>
+    <div className="relative w-full h-full rounded-2xl overflow-hidden shadow-inner z-0 bg-slate-100">
+      <div ref={containerRef} className="w-full h-full" style={{ minHeight: '100%', minWidth: '100%' }} />
     </div>
   );
 }
