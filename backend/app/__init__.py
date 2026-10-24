@@ -17,7 +17,7 @@ def create_app(test_config=None):
     # Point Flask to the frontend build folder (frontend/dist) relative to backend/app
     static_folder_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../frontend/dist'))
     
-    app = Flask(__name__, static_folder=static_folder_path, static_url_path='')
+    app = Flask(__name__, static_folder=static_folder_path)
 
     # Default config
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-me-to-a-random-string')
