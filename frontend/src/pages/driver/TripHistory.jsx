@@ -1,80 +1,88 @@
 import React, { useState, useEffect } from 'react';
-import { useAuth } from '../../context/AuthContext';
-import { History, Leaf, Navigation, Loader, CheckCircle } from 'lucide-react';
-import Card from '../../components/Card';
-import api from '../../api/api';
+import { api } from '../../api/api';
 
 export default function TripHistory() {
-  const { user } = useAuth();
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Note: To show history properly we would need an endpoint like GET /trips/history
-    // For now, let's fetch all (which the mock/API would need to support or we'll just mock it)
-    // Actually, Phase 3 didn't build GET /trips listing, so let's use a mock list for the UI until Phase 5 Reporting
-    setLoading(false);
-    
-    // In a real app we'd fetch this from the backend
-    setTrips([
-      { id: 101, source: "Distribution Center", destination: "Store A", status: "completed", date: "2026-07-02", actual_co2_kg: 12.4, eco_score: 85 },
-      { id: 102, source: "Store A", destination: "Store B", status: "completed", date: "2026-07-03", actual_co2_kg: 8.1, eco_score: 92 },
-    ]);
+    async function load() {
+      let local = [];
+      try {
+        local = JSON.parse(localStorage.getItem('tripHistory') || '[]');
+      } catch { /* ignore corrupt storage */ }
+
+      // retry uploading trips that couldn't reach the server when they finished
+      for (const t of local.filter((x) => !x.synced && x.tripId)) {
+        try {
+          await api.post('/trips/complete', t);
+          t.synced = true;
+        } catch { /* still offline; try next time */ }
+      }
+      localStorage.setItem('tripHistory', JSON.stringify(local));
+
+      let server = [];
+      try {
+        const res = await api.get('/trips/history');
+        server = Array.isArray(res.data?.trips) ? res.data.trips : [];
+      } catch { /* server unreachable: show local only */ }
+
+      const seen = new Set(server.map((t) => t.tripId));
+      setTrips([...server, ...local.filter((t) => !seen.has(t.tripId))]);
+      setLoading(false);
+    }
+    load();
   }, []);
 
-  if (loading) return <div className="flex justify-center py-20"><Loader className="animate-spin text-primary" size={32} /></div>;
+  const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '—' : Number(v).toFixed(d));
 
   return (
-    <div className="max-w-4xl mx-auto flex flex-col gap-6">
-      <div className="flex items-center gap-3 mb-2">
-        <div className="w-10 h-10 bg-sky/10 rounded-xl flex items-center justify-center text-sky">
-          <History size={20} />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-neutral-textMain">Trip History</h1>
-          <p className="text-sm text-neutral-textMuted">View your past deliveries and eco performance</p>
-        </div>
+    <div className="p-6 max-w-6xl mx-auto space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-extrabold text-slate-800">📜 Trip History</h2>
+        <span className="text-xs font-semibold text-slate-500">Completed Trips: {trips.length}</span>
       </div>
 
-      <div className="flex flex-col gap-4">
-        {trips.length === 0 ? (
-          <Card className="text-center py-12">
-            <Navigation className="w-12 h-12 text-neutral-textMuted/50 mx-auto mb-4" />
-            <h2 className="text-lg font-bold text-neutral-textMain mb-1">No completed trips yet</h2>
-            <p className="text-sm text-neutral-textMuted">Your completed trips will appear here.</p>
-          </Card>
-        ) : (
-          trips.map(trip => (
-            <Card key={trip.id} className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 hover:shadow-md transition-shadow">
-              
-              <div className="flex-1">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs font-bold bg-neutral-bg px-2 py-0.5 rounded text-neutral-textMuted">#{trip.id}</span>
-                  <span className="text-xs text-neutral-textMuted">{trip.date}</span>
+      {loading ? (
+        <div className="text-center p-8 text-slate-400">Loading trip history...</div>
+      ) : trips.length === 0 ? (
+        <div className="bg-white p-12 rounded-2xl text-center text-slate-400 border border-slate-100">
+          No completed trips found. Start and complete a trip from the <b>New Trip</b> tab!
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {trips.map((trip, idx) => (
+            <div key={trip.tripId || idx} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-800">{trip.origin} ➔ {trip.destination}</span>
+                  <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded-full">{trip.status || 'COMPLETED'}</span>
+                  {trip.synced === false && (
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded-full">Not synced</span>
+                  )}
                 </div>
-                <h3 className="font-bold text-neutral-textMain text-lg">{trip.source} → {trip.destination}</h3>
-                <div className="flex items-center gap-1 mt-1 text-sm text-eco font-medium">
-                  <CheckCircle size={14} /> {trip.status}
+                <p className="text-xs text-slate-500 mt-1">
+                  Completed: {trip.completedAt || 'Recently'} | Route: {trip.title || 'Standard'} | {fmt(trip.distanceKm, 1)} km
+                </p>
+              </div>
+              <div className="flex gap-4 text-xs">
+                <div className="text-center">
+                  <span className="text-slate-400 block">{trip.fuelUnit === 'kWh' ? 'Energy' : 'Fuel'}</span>
+                  <span className="font-bold text-slate-700">{fmt(trip.fuelLiters)} {trip.fuelUnit || 'L'}</span>
+                </div>
+                <div className="text-center">
+                  <span className="text-slate-400 block">CO₂</span>
+                  <span className="font-bold text-slate-700">{fmt(trip.co2Kg)} kg</span>
+                </div>
+                <div className="text-center">
+                  <span className="text-slate-400 block">Eco Score</span>
+                  <span className="font-bold text-emerald-600">{trip.ecoScore != null ? `${trip.ecoScore}/100` : '—'}</span>
                 </div>
               </div>
-
-              <div className="flex gap-4 sm:border-l border-neutral-border sm:pl-6">
-                <div>
-                  <p className="text-xs text-neutral-textMuted uppercase font-bold tracking-wide">CO₂ Emitted</p>
-                  <p className="font-bold text-neutral-textMain">{trip.actual_co2_kg} kg</p>
-                </div>
-                <div>
-                  <p className="text-xs text-neutral-textMuted uppercase font-bold tracking-wide">Eco Score</p>
-                  <div className="flex items-center gap-1 font-bold text-eco">
-                    <Leaf size={14} /> {trip.eco_score}
-                  </div>
-                </div>
-              </div>
-              
-            </Card>
-          ))
-        )}
-      </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

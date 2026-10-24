@@ -1,6 +1,5 @@
 import React from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { useAuth } from '../../context/AuthContext';
 import { Leaf, LayoutDashboard, Plus, History, Bell, User, LogOut } from 'lucide-react';
 
 const NAV = [
@@ -12,9 +11,18 @@ const NAV = [
 ];
 
 export default function DriverLayout() {
-  const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const handleLogout = () => { logout(); navigate('/login'); };
+
+  // Read saved user metadata safely from localStorage
+  const userData = JSON.parse(localStorage.getItem('userData') || '{}');
+  const userName = userData.name || 'Demo Driver';
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userRole');
+    localStorage.removeItem('userData');
+    navigate('/login');
+  };
 
   return (
     <div className="min-h-screen bg-neutral-bg flex flex-col">
@@ -35,8 +43,8 @@ export default function DriverLayout() {
           ))}
         </nav>
         <div className="flex items-center gap-3">
-          <span className="text-sm text-neutral-textMuted">{user?.name}</span>
-          <button onClick={handleLogout} className="text-neutral-textMuted hover:text-danger"><LogOut size={18} /></button>
+          <span className="text-sm font-semibold text-slate-700">{userName}</span>
+          <button onClick={handleLogout} className="text-neutral-textMuted hover:text-danger cursor-pointer"><LogOut size={18} /></button>
         </div>
       </header>
 
