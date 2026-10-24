@@ -12,3 +12,4 @@ email-validator==2.1.0
 requests==2.32.3
 pandas==2.2.2
 numpy==1.26.4
+reportlab==4.2.0
