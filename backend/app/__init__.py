@@ -72,14 +72,20 @@ def create_app(test_config=None):
     app.register_blueprint(admin_bp, url_prefix='/api/v1/admin')
     app.register_blueprint(reports_bp, url_prefix='/api/v1/reports')
 
-    # Catch-all route to serve React frontend router correctly in single-server mode
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')
     def serve_react(path):
-        if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        # Let API requests pass through normally
+        if path.startswith('api/'):
+            return {"error": "Not found"}, 404
+            
+        # Serve actual static assets (JS, CSS, images) if they exist
+        file_path = os.path.join(app.static_folder, path)
+        if path != "" and os.path.exists(file_path):
             return send_from_directory(app.static_folder, path)
-        else:
-            return send_from_directory(app.static_folder, 'index.html')
+            
+        # Otherwise, always fallback to index.html for React Router
+        return send_from_directory(app.static_folder, 'index.html')
 
     # Force-seed default demo accounts on application startup
     with app.app_context():
