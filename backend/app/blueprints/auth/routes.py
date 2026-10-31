@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from flask import Blueprint, request, jsonify, current_app, send_from_directory
 from flask_jwt_extended import (create_access_token, create_refresh_token, jwt_required,
-                                get_jwt_identity)
+                                get_jwt_identity, decode_jwt, verify_jwt_in_request)
 from sqlalchemy.exc import IntegrityError
 
 from app import db, limiter
@@ -335,8 +335,25 @@ def reset_password():
 # ── admin: view an applicant's license document ──────────────────────────────
 
 @auth_bp.route('/license-doc/<int:driver_id>', methods=['GET'])
-@role_required('admin')
 def license_doc(driver_id):
+    token = request.args.get('token')
+    if token:
+        try:
+            dec = decode_jwt(token)
+            user = User.query.get(dec['sub'])
+            if not user or (user.role.value if hasattr(user.role, 'value') else str(user.role)).lower() != 'admin':
+                return _err('forbidden', 'Admin access only', 403)
+        except Exception:
+            return _err('unauthorized', 'Invalid or expired token', 401)
+    else:
+        try:
+            verify_jwt_in_request()
+            user = User.query.get(get_jwt_identity())
+            if not user or (user.role.value if hasattr(user.role, 'value') else str(user.role)).lower() != 'admin':
+                return _err('forbidden', 'Admin access only', 403)
+        except Exception:
+            return _err('unauthorized', 'Authentication required', 401)
+
     driver = Driver.query.get(driver_id)
     if not driver or not driver.license_doc_url:
         return _err('not_found', 'No document on file', 404)
