@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from flask import Blueprint, request, jsonify, current_app, send_from_directory
 from flask_jwt_extended import (create_access_token, create_refresh_token, jwt_required,
-                                get_jwt_identity, decode_jwt, verify_jwt_in_request)
+                                get_jwt_identity, verify_jwt_in_request)
+from flask_jwt_extended.utils import decode_token
 from sqlalchemy.exc import IntegrityError
 
 from app import db, limiter
@@ -339,7 +340,7 @@ def license_doc(driver_id):
     token = request.args.get('token')
     if token:
         try:
-            dec = decode_jwt(token)
+            dec = decode_token(token)
             user = User.query.get(dec['sub'])
             if not user or (user.role.value if hasattr(user.role, 'value') else str(user.role)).lower() != 'admin':
                 return _err('forbidden', 'Admin access only', 403)
