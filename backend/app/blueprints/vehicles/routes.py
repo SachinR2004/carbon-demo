@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import get_jwt_identity
 from app import db
-from app.models import Vehicle, VehicleStatus, Driver, AuditLog
+from app.models import Vehicle, VehicleStatus, Driver, AuditLog, User
 from app.utils.rbac import role_required
 
 vehicles_bp = Blueprint('vehicles', __name__)
@@ -19,7 +19,6 @@ def list_vehicles():
     result = []
     for v in vehicles:
         driver = Driver.query.get(v.assigned_driver_id) if v.assigned_driver_id else None
-        from app.models import User
         driver_user = User.query.get(driver.user_id) if driver else None
         result.append({
             "id": v.id,
@@ -48,13 +47,18 @@ def create_vehicle():
     if Vehicle.query.filter_by(vehicle_no=data['vehicle_no']).first():
         return jsonify({"error": "conflict", "message": "Vehicle number already exists"}), 409
 
+    # Handle driver_id from either assigned_driver_id or driver_id payload keys
+    driver_id = data.get('assigned_driver_id') or data.get('driver_id')
+    if driver_id == '' or driver_id == 'Unassigned':
+        driver_id = None
+
     vehicle = Vehicle(
         vehicle_no=data['vehicle_no'],
         type=data['type'],
         fuel_type=data['fuel_type'],
         load_capacity_kg=data.get('load_capacity_kg', 1000),
         emission_factor_g_per_km=data.get('emission_factor_g_per_km', 120.0),
-        assigned_driver_id=data.get('assigned_driver_id'),
+        assigned_driver_id=int(driver_id) if driver_id else None,
         status=VehicleStatus.active
     )
     db.session.add(vehicle)
@@ -63,6 +67,30 @@ def create_vehicle():
     db.session.commit()
 
     return jsonify({"message": "Vehicle created", "id": vehicle.id}), 201
+
+
+@vehicles_bp.route('/<int:vehicle_id>/assign', methods=['POST'])
+@role_required('admin')
+def assign_vehicle(vehicle_id):
+    actor_id = get_jwt_identity()
+    vehicle = Vehicle.query.get(vehicle_id)
+    if not vehicle:
+        return jsonify({"error": "not_found", "message": "Vehicle not found"}), 404
+
+    data = request.get_json() or {}
+    driver_id = data.get('driver_id')
+
+    if not driver_id or driver_id == '' or driver_id == 'Unassigned':
+        vehicle.assigned_driver_id = None
+    else:
+        try:
+            vehicle.assigned_driver_id = int(driver_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": "validation_error", "message": "Invalid driver ID"}), 422
+
+    _write_audit(actor_id, 'update', vehicle_id)
+    db.session.commit()
+    return jsonify({"message": "Vehicle assignment updated successfully"}), 200
 
 
 @vehicles_bp.route('/<int:vehicle_id>', methods=['PATCH'])
