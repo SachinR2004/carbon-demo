@@ -54,6 +54,8 @@ export default function DriverApprovals() {
     }
   };
 
+  const token = localStorage.getItem('access_token') || '';
+
   return (
     <div className="max-w-7xl mx-auto space-y-6 font-sans p-6 text-slate-800">
       <div className="border-b border-slate-200 pb-4">
@@ -187,7 +189,7 @@ export default function DriverApprovals() {
                 <div className="pt-2">
                   <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">Compliance Document</span>
                   <a
-                    href={`http://127.0.0.1:5000/api/v1/auth/license-doc/${selectedDriver.id}`}
+                    href={`${api.defaults.baseURL || '/api/v1'}/auth/license-doc/${selectedDriver.id}?token=${token}`}
                     target="_blank"
                     rel="noreferrer"
                     className="p-3 bg-blue-50 border border-blue-200 text-blue-700 rounded-xl font-bold flex items-center justify-between hover:bg-blue-100 transition"
